@@ -1,3 +1,6 @@
+<details>
+<summary><b>🇨🇳 点击展开中文版说明 (Click to expand Chinese version)</b></summary>
+
 # FakeModel 人工接管 OpenAI API 代理系统
 
 FakeModel 是一个为开发调试、大模型输出安全审计或特定 API 联调场景设计的人工接管代理系统。它能伪装成 OpenAI API 服务，将客户端的所有请求拦截并同步到前端控制台，由人工进行实时作答或审计后再以流式（SSE）或标准 JSON 的方式回写给客户端，实现完全可控的大模型“人工代打”。
@@ -90,3 +93,98 @@ cd gui && npm install
 - `/public`：编译打包后的前端 GUI 静态资源托管目录。
 - `/gui`：Vue 3 控制台源码，所有网页样式、交互和多语言字典均已集成于 `src/App.vue` 中。
 - `/tests`：包含 `test_client.js` 与 `test_frontend_sim.js` 的接口模拟与客服交互测试脚本文件夹。
+
+</details>
+
+# FakeModel: Manual Takeover OpenAI API Proxy System
+
+FakeModel is a manual takeover proxy system designed for development debugging, LLM output security auditing, or specific API integration testing. It acts as an OpenAI API service, intercepting all client requests and synchronizing them to a front-end control panel. A human operator can then compose responses or perform audits in real-time, after which the responses are streamed (via SSE) or returned as standard JSON back to the client, enabling fully controlled human-in-the-loop interaction.
+
+---
+
+## Core Features
+
+1. **Zero-Configuration OpenAI API Client Compatibility**:
+   - Fully compatible with the standard `/v1/chat/completions` POST endpoint, supporting context reloading for multi-round client conversations.
+   - Automatically parses API parameters, extracting the requested model name (`model`) and the registered tools/functions (`tools` / `functions`).
+2. **Visual Manual Takeover Control Panel**:
+   - **Adaptive Tools Sidebar**: Dynamically expands to display the registered tool list when a client request contains tool declarations. Supports fuzzy filtering, resizable dragging, and `localStorage` state persistence.
+   - **Expanded Double-Column Details Modal**: Click any tool card to display its metadata and parameters Schema (JSON formatted) in a 1200px double-column modal.
+   - **Collapsible Message Bubble**: Restricts single chat history messages to 8 lines. Excess text is truncated with `...`, offering a stylish "Expand / Collapse" button nested neatly inside the bubble.
+3. **i18n Multi-Language Support**:
+   - Offers an options menu (`•••`) in the sidebar header to switch among "Auto / Chinese / English" language modes with persistence.
+4. **Reliable TCP Connection Disconnect Detection**:
+   - Listens to the `close` event on the underlying Response Object, capturing 100% of physical client termination or process kills. The status instantly changes to `disconnected` (in red) to prevent dangling connections.
+5. **Multi-Round Conversation Matching & Reviving**:
+   - When a client initiates multi-round chats, the backend matches the history with active records, merges the new request into the existing session, brings the card to the top, and triggers a pulsing indicator to alert the operator.
+
+---
+
+## Quick Start
+
+### 1. Install Dependencies
+Since the backend files have been flattened to the root directory, you can install the dependencies separately for the root server and the GUI console:
+```bash
+# Install root backend dependencies (ws module)
+npm install
+
+# Install GUI front-end dependencies
+cd gui && npm install
+```
+
+### 2. Build & Run
+
+#### Mode A: Hosted Production Mode (Recommended 🌟 - Built and served by Server)
+With the compiled front-end static assets hosted directly by the Node server, you can build and run everything from the root directory:
+
+* **Run via command line**:
+  Execute directly at the **root directory**:
+  ```bash
+  # 1. Compile the front-end, outputting static assets to /public
+  npm run build
+  
+  # 2. Start the hosting server
+  npm start
+  ```
+* **Run via VS Code Task**:
+  Launch the VS Code task: **`启动托管环境 (一键构建并运行)`** (Start Hosting - Build and Run). It uses a sequential task flow to build the front-end and then boot the server.
+
+Once the service starts successfully, open your browser and navigate to:
+👉 **Control Panel URL: `http://localhost:3000`**
+
+#### Mode B: Front-End Development Mode (HMR Debugging)
+If you wish to modify the front-end code with Hot Module Replacement (HMR):
+* **Option 1**: Run the VS Code task: **`启动开发环境 (热更新双端)`** (Start Dev Environment). It runs parallel tasks to launch the proxy server (`3000`) and the Vite dev server (`5173`).
+* **Option 2**: Run via command line:
+  - Run `node server.js` at the root directory.
+  - Run `npm run dev` under the `gui` directory.
+  Access the hot-reload interface at `http://localhost:5173`.
+
+---
+
+## Integration Test & Verification
+
+To verify the bi-directional communication channel of the system, we provide a full-featured mock test suite:
+
+1. **Client Sends Mock Request**:
+   Run the mock API client request at the root directory:
+   ```bash
+   # Send a streaming request containing custom model name and 2 tool functions
+   node tests/test_client.js
+   ```
+   The request will be suspended by the backend, and a card with a pulsing warning indicator will instantly pop up in the control panel.
+2. **Operator Simulates Reply**:
+   - You can type your response in the textarea in the web UI and hit Enter.
+   - Alternatively, start the auto-reply simulator at the root directory to perform an automated loop test:
+     ```bash
+     node tests/test_frontend_sim.js
+     ```
+     The simulator automatically mimics typing and replies within 1.5s, writing chunks back to the client and releasing the TCP connection cleanly.
+
+---
+
+## Project Structure
+- `server.js`: The Node.js proxy server main entry point located at the root.
+- `/public`: The hosted static assets directory containing compiled GUI bundles.
+- `/gui`: The Vue 3 source code for the console. All interface layouts and localizations are compiled from `src/App.vue`.
+- `/tests`: Independent folder containing test scripts `test_client.js` and `test_frontend_sim.js`.
