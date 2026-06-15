@@ -72,14 +72,14 @@ cd gui && npm install
    在项目根目录下运行模拟的 API 客户端请求：
    ```bash
    # 运行客户端（发送一个带有 gpt-4-turbo-custom-model 及 2 个工具函数的流式请求）
-   node test_client.js
+   node tests/test_client.js
    ```
    此时客户端请求会被后端挂起，并在前端控制中心瞬间弹出一个呼吸灯闪烁的卡片，显示大模型名与 `🛠️ 2` 标签。
 2. **人工接管作答**：
    - 您可以直接在前端网页的输入框内打字并回车发送进行回复。
    - 也可以通过在项目根目录下启动自动回复模拟器来验证全自动闭环：
      ```bash
-     node test_frontend_sim.js
+     node tests/test_frontend_sim.js
      ```
      模拟客服会自动在 1.5 秒内进行打字作答，流式同步回写给客户端，最后安全释放 TCP。
 
@@ -89,4 +89,4 @@ cd gui && npm install
 - `server.js`：放置于项目根目录下的 Node.js 服务端主程序。
 - `/public`：编译打包后的前端 GUI 静态资源托管目录。
 - `/gui`：Vue 3 控制台源码，所有网页样式、交互和多语言字典均已集成于 `src/App.vue` 中。
-- `test_client.js` 与 `test_frontend_sim.js`：放置于根目录下的接口模拟与客服交互测试脚本。
+- `/tests`：包含 `test_client.js` 与 `test_frontend_sim.js` 的接口模拟与客服交互测试脚本文件夹。
