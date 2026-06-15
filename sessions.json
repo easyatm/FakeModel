@@ -1,0 +1,86 @@
+[
+  {
+    "session_id": "26061523390101",
+    "messages": [
+      {
+        "role": "user",
+        "content": "第一轮问题：你好，我想测试一下人工客服接管功能。"
+      },
+      {
+        "role": "assistant",
+        "content": "第一轮人工回复：您好，我是人工客服！我已经成功接管了该会话，第一轮测试通过！"
+      },
+      {
+        "role": "user",
+        "content": "第二轮问题：太好了！连接已被标为已回复，现在新一轮测试通过！"
+      },
+      {
+        "role": "assistant",
+        "content": "第二轮人工回复：您好，第二轮提问我们也已经成功接收并接管，目前一切运行良好，多轮复活测试通过！"
+      }
+    ],
+    "is_waiting": false,
+    "stream": true,
+    "status": "disconnected",
+    "model": "gpt-4-turbo-custom-model",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather_forecast",
+          "description": "查询指定城市的未来天气预报信息",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名称，例如：北京、上海"
+              },
+              "days": {
+                "type": "integer",
+                "description": "需要预测的天数，最大支持 7 天"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "calculate_distance",
+          "description": "计算两个地理坐标（经纬度）之间的球物理距离",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "lat1": {
+                "type": "number",
+                "description": "起点纬度"
+              },
+              "lng1": {
+                "type": "number",
+                "description": "起点经度"
+              },
+              "lat2": {
+                "type": "number",
+                "description": "终点纬度"
+              },
+              "lng2": {
+                "type": "number",
+                "description": "终点经度"
+              }
+            },
+            "required": [
+              "lat1",
+              "lng1",
+              "lat2",
+              "lng2"
+            ]
+          }
+        }
+      }
+    ]
+  }
+]
