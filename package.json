@@ -1,12 +1,13 @@
 {
   "name": "fakemodel",
-  "version": "1.0.0",
+  "version": "26.6.18-124654",
   "private": true,
   "type": "module",
   "main": "server.js",
   "scripts": {
     "build": "npm run build --prefix gui",
-    "start": "node server.js"
+    "start": "node server.js",
+    "pack-tar": "node pack_tar_gz.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

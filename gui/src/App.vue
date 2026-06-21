@@ -82,6 +82,33 @@
           </div>
         </div>
         
+        <!-- API Key 私有隔离绑定面板 -->
+        <div class="key-binding-panel glass-panel">
+          <div class="key-panel-title">
+            <span>🔑 {{ t('bind_key_label') }}</span>
+            <span class="key-mode-badge" :class="bind_key ? 'bound' : 'ip-mode'">
+              {{ bind_key ? t('status_key_bound') : t('status_ip_bound') }}
+            </span>
+          </div>
+          <div class="key-input-row">
+            <div class="key-input-wrapper">
+              <input 
+                v-model="bind_key" 
+                :type="show_key_text ? 'text' : 'password'" 
+                :placeholder="t('bind_key_placeholder')"
+                class="key-input"
+                @keydown.enter="apply_key_binding"
+              />
+              <span class="btn-toggle-eye" @click="show_key_text = !show_key_text" role="button">
+                {{ show_key_text ? '👁' : '👁‍🗨' }}
+              </span>
+            </div>
+            <button class="btn-apply-key" @click="apply_key_binding">
+              {{ t('btn_apply_key') }}
+            </button>
+          </div>
+        </div>
+
         <!-- 全局一键清空按钮 -->
         <button 
           v-if="sessions.length > 0" 
@@ -210,16 +237,25 @@
                     <pre 
                       :ref="el => set_message_text_ref(el, current_session.session_id + '_' + index)"
                       class="message-text"
-                      :class="{ collapsed: !expanded_messages[current_session.session_id + '_' + index] }"
+                      :class="{ collapsed: !is_message_expanded(current_session.session_id, index) }"
                     >{{ msg.content }}</pre>
                     
-                    <!-- 展开/收起控制按钮，只有当消息溢出时在泡泡右下角显示 -->
-                    <button 
-                      v-if="overflowed_messages[current_session.session_id + '_' + index]"
-                      class="btn-toggle-expand"
+                    <!-- 融合式折叠遮罩：当消息溢出且处于折叠状态时展示，自带底部渐变融合 -->
+                    <div 
+                      v-if="overflowed_messages[current_session.session_id + '_' + index] && !is_message_expanded(current_session.session_id, index)"
+                      class="message-text-fade-mask"
                       @click="toggle_message_expand(current_session.session_id, index)"
                     >
-                      {{ expanded_messages[current_session.session_id + '_' + index] ? t('btn_collapse') : t('btn_expand') }}
+                      <span class="btn-toggle-link">{{ t('btn_expand') }}</span>
+                    </div>
+
+                    <!-- 融合式的内联收起按钮：当消息溢出且处于展开状态时在底部展示 -->
+                    <button 
+                      v-else-if="overflowed_messages[current_session.session_id + '_' + index]"
+                      class="btn-toggle-expand-inline"
+                      @click="toggle_message_expand(current_session.session_id, index)"
+                    >
+                      {{ t('btn_collapse') }}
                     </button>
                   </div>
                 </div>
@@ -245,6 +281,7 @@
                   class="reply-textarea"
                   :disabled="current_session.status === 'ended' || current_session.status === 'disconnected'"
                   @keydown.enter.exact.prevent="submit_reply(current_session.session_id)"
+                  @keydown.enter.ctrl.prevent="submit_reply_and_end(current_session.session_id)"
                 ></textarea>
               </div>
             </footer>
@@ -319,7 +356,7 @@
                 </transition>
               </div>
               <div class="badge-value-wrapper">
-                <span class="badge-value highlight">http://localhost:3000/v1/chat/completions</span>
+                <span class="badge-value highlight">{{ server_url }}/v1/chat/completions</span>
                 <button 
                   class="btn-copy" 
                   @click="copy_address_to_clipboard" 
@@ -430,11 +467,41 @@ const lang_mode = ref('auto');
 // 复制操作成功状态标识
 const copy_success = ref(false);
 
+// 动态获取当前服务的 HTTP 地址前缀
+const server_url = computed(() => {
+  const current_port = window.location.port ? `:${window.location.port}` : '';
+  return `${window.location.protocol}//${window.location.hostname}${current_port}`;
+});
+
+// 用于会话隔离绑定的 API Key
+const bind_key = ref('');
+// 切换 Key 密文可见性状态
+const show_key_text = ref(false);
+
+/**
+ * 保存并应用 API Key 隔离绑定，重连 WebSocket 建立专有接管通道
+ */
+function apply_key_binding() {
+  const clean_key = bind_key.value.trim();
+  localStorage.setItem('fake_model_bind_key', clean_key);
+  console.log(`API Key 绑定已保存为 "${clean_key ? clean_key.substring(0, 8) + '...' : '空'}"，正在重连服务...`);
+  
+  if (ws_socket) {
+    // 标记为手动关闭以避开常规延时重连
+    ws_socket.manual_closing = true;
+    ws_socket.close();
+  }
+  // 立即重连，无需等待
+  connect_to_server();
+}
+
 /**
  * 一键复制 API 服务端地址到系统剪贴板
  */
 function copy_address_to_clipboard() {
-  navigator.clipboard.writeText('http://localhost:3000/v1/chat/completions')
+  const current_port = window.location.port ? `:${window.location.port}` : '';
+  const current_url = `${window.location.protocol}//${window.location.hostname}${current_port}/v1/chat/completions`;
+  navigator.clipboard.writeText(current_url)
     .then(() => {
       copy_success.value = true;
       // 输出中文日志以记录操作状态
@@ -472,7 +539,7 @@ const locales = {
     btn_terminate: "结束该会话",
     alert_waiting: "系统挂起中：正在等待您输入回复以响应客户端...",
     alert_ended: "ℹ️ 该会话已结束 (连接已关闭)。",
-    input_placeholder: "请输入您要回复的内容... (支持 Enter 发送，Shift+Enter 换行)",
+    input_placeholder: "请输入您要回复的内容... (Enter 发送，Ctrl+Enter 发送并结束，编辑框为空时直接结束会话)",
     tools_title: "挂载的工具函数",
     tool_search_placeholder: "过滤工具函数...",
     tool_desc_empty: "无详细描述说明",
@@ -501,7 +568,12 @@ const locales = {
     lang_en: "English (English)",
     unknown_model: "未知模型",
     copy_success_text: "已成功复制到剪贴板！",
-    copy_title: "一键复制服务地址"
+    copy_title: "一键复制服务地址",
+    bind_key_label: "API Key 隔离绑定",
+    bind_key_placeholder: "输入用于隔离的 API Key...",
+    btn_apply_key: "应用",
+    status_key_bound: "Key 隔离",
+    status_ip_bound: "IP 隔离"
   },
   en: {
     status_connected: "Service Connected",
@@ -523,7 +595,7 @@ const locales = {
     btn_terminate: "End Session",
     alert_waiting: "System suspended: Waiting for your input to reply to the client...",
     alert_ended: "ℹ️ This session has ended (Connection closed).",
-    input_placeholder: "Please type your reply here... (Enter to send, Shift+Enter for new line)",
+    input_placeholder: "Type reply... (Enter to send, Ctrl+Enter to send & end, directly end session if input is empty)",
     tools_title: "Mounted Tools",
     tool_search_placeholder: "Filter tools...",
     tool_desc_empty: "No description provided",
@@ -552,7 +624,12 @@ const locales = {
     lang_en: "English (English)",
     unknown_model: "unknown",
     copy_success_text: "Copied to clipboard!",
-    copy_title: "Copy Server Address"
+    copy_title: "Copy Server Address",
+    bind_key_label: "API Key Binding",
+    bind_key_placeholder: "Enter API Key...",
+    btn_apply_key: "Apply",
+    status_key_bound: "Key Mode",
+    status_ip_bound: "IP Mode"
   }
 };
 
@@ -631,13 +708,35 @@ function set_message_text_ref(el, key) {
 }
 
 /**
+ * 判断某条消息是否应当处于展开状态
+ * 规则：如果用户手动设置过展开/折叠，以用户的设置为主；
+ * 否则，如果它是当前会话的最后一条消息，则默认展开；
+ * 其它消息默认折叠（收起）。
+ * @param {string} session_id 会话ID
+ * @param {number} index 消息索引值
+ * @returns {boolean} 是否展开
+ */
+function is_message_expanded(session_id, index) {
+  const key = `${session_id}_${index}`;
+  if (expanded_messages.value[key] !== undefined) {
+    return expanded_messages.value[key];
+  }
+  const session = sessions.value.find(s => s.session_id === session_id);
+  if (session && session.messages) {
+    return index === session.messages.length - 1;
+  }
+  return false;
+}
+
+/**
  * 切换消息折叠展开状态
  * @param {string} session_id 会话ID
  * @param {number} index 消息索引值
  */
 function toggle_message_expand(session_id, index) {
   const key = `${session_id}_${index}`;
-  expanded_messages.value[key] = !expanded_messages.value[key];
+  // 切换用户的显式展开意图
+  expanded_messages.value[key] = !is_message_expanded(session_id, index);
 }
 
 /**
@@ -651,12 +750,20 @@ function check_messages_overflow() {
       const key = `${session_id}_${index}`;
       const el = message_texts_map[key];
       if (el) {
-        // 如果当前已经被手动展开，不做溢出校正，保留溢出按钮显示
-        const is_expanded = !!expanded_messages.value[key];
-        if (!is_expanded) {
-          const has_overflow = el.scrollHeight > el.clientHeight;
-          overflowed_messages.value[key] = has_overflow;
+        // 为了在任何展开/折叠状态下都能准确判定在折叠状态时是否溢出，
+        // 临时为没有 collapsed 的元素追加 collapsed 样式类来进行一次 clientHeight 高度探测
+        const was_collapsed = el.classList.contains('collapsed');
+        if (!was_collapsed) {
+          el.classList.add('collapsed');
         }
+        
+        const has_overflow = el.scrollHeight > el.clientHeight;
+        
+        if (!was_collapsed) {
+          el.classList.remove('collapsed');
+        }
+        
+        overflowed_messages.value[key] = has_overflow;
       }
     });
   });
@@ -913,6 +1020,32 @@ function submit_reply(session_id) {
 }
 
 /**
+ * 人工提交回复内容给后端，并立刻结束当前会话 (支持 ctrl+enter 触发)
+ * 如果编辑框为空，则不发送回复直接结束会话
+ * @param {string} session_id 会话ID
+ */
+function submit_reply_and_end(session_id) {
+  const content = draft_replies.value[session_id] || '';
+  const session = sessions.value.find(s => s.session_id === session_id);
+  if (!session || (session.status !== 'waiting' && session.status !== 'active') || is_submitting.value) {
+    return;
+  }
+
+  if (!content.trim()) {
+    // 编辑框为空，不发送消息直接结束会话
+    terminate_session(session_id);
+  } else {
+    // 编辑框不为空，先提呈回复，再结束会话
+    submit_reply(session_id);
+    
+    // TCP 在 WS 链路上保序，延迟 50ms 触发以确保先后到达更稳健
+    setTimeout(() => {
+      terminate_session(session_id);
+    }, 50);
+  }
+}
+
+/**
  * 手动强制结束当前挂起的 API 会话请求
  * @param {string} session_id 会话ID
  */
@@ -934,8 +1067,11 @@ function terminate_session(session_id) {
 function connect_to_server() {
   ws_status.value = 'connecting';
   
-  // 后端将 WS 挂载在同一个 3000 端口上
-  ws_socket = new WebSocket(`ws://${window.location.hostname}:3000`);
+  // 动态使用当前网页的端口建立 WS 连接
+  const key_param = bind_key.value.trim() ? `?key=${encodeURIComponent(bind_key.value.trim())}` : '';
+  const current_port = window.location.port ? `:${window.location.port}` : '';
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws_socket = new WebSocket(`${protocol}//${window.location.hostname}${current_port}${key_param}`);
 
   ws_socket.onopen = () => {
     console.log("WebSocket 成功连接到 FakeModel 服务端！");
@@ -951,10 +1087,15 @@ function connect_to_server() {
     }
   };
 
+  const socket_instance = ws_socket;
   ws_socket.onclose = () => {
-    console.log("WebSocket 连接已断开，5秒后尝试重连...");
+    // 如果是手动关闭，则跳过常规重连（因为手动关闭逻辑中已经立即重连了）
+    if (socket_instance && socket_instance.manual_closing) {
+      return;
+    }
+    console.log("WebSocket 连接已断开，1秒后尝试重连...");
     ws_status.value = 'disconnected';
-    setTimeout(connect_to_server, 5000);
+    setTimeout(connect_to_server, 1000);
   };
 
   ws_socket.onerror = (err) => {
@@ -1059,6 +1200,12 @@ onMounted(() => {
   const saved_lang_mode = localStorage.getItem('fake_model_lang_mode');
   if (saved_lang_mode) {
     lang_mode.value = saved_lang_mode;
+  }
+
+  // 从 localStorage 恢复已保存的 API Key 绑定
+  const saved_bind_key = localStorage.getItem('fake_model_bind_key');
+  if (saved_bind_key) {
+    bind_key.value = saved_bind_key;
   }
 
   connect_to_server();
@@ -2325,43 +2472,91 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 折叠/展开控制按钮样式：要在消息泡泡内的右下角显示 */
-.btn-toggle-expand {
-  align-self: flex-end; /* 在 Flex 容器下强行靠右对齐，即泡泡内部右下角 */
-  margin-top: 8px; /* 留出与上方文本的间距 */
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 500;
+/* 融合式折叠渐变遮罩 */
+.message-text-fade-mask {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 65px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding-right: 18px;
+  padding-bottom: 8px;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  outline: none;
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 16px;
+  transition: all 0.3s ease;
 }
 
-.message-user .btn-toggle-expand {
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+/* 消息泡泡底部圆角自适应 */
+.message-user .message-text-fade-mask {
+  border-bottom-left-radius: 2px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, rgba(15, 23, 42, 0.85) 50%, rgba(15, 23, 42, 0.98) 100%);
+}
+
+.message-assistant .message-text-fade-mask {
+  border-bottom-right-radius: 2px;
+  background: linear-gradient(to bottom, rgba(99, 102, 241, 0) 0%, rgba(79, 70, 229, 0.85) 50%, rgba(79, 70, 229, 0.98) 100%);
+}
+
+/* 遮罩上的文字链接 */
+.btn-toggle-link {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  padding: 2px 0;
+  transition: all 0.2s ease;
+  background: transparent !important;
+  border: none !important;
+}
+
+.message-user .btn-toggle-link {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.message-user .message-text-fade-mask:hover .btn-toggle-link {
   color: #a5b4fc;
 }
 
-.message-user .btn-toggle-expand:hover {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.25);
-  color: #fff;
-  transform: translateY(-1px);
+.message-assistant .btn-toggle-link {
+  color: rgba(255, 255, 255, 0.7);
 }
 
-.message-assistant .btn-toggle-expand {
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+.message-assistant .message-text-fade-mask:hover .btn-toggle-link {
   color: #fff;
 }
 
-.message-assistant .btn-toggle-expand:hover {
-  background: rgba(255, 255, 255, 0.28);
-  border-color: rgba(255, 255, 255, 0.35);
+/* 展开状态下的内联收起按钮 */
+.btn-toggle-expand-inline {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  align-self: flex-end;
+  margin-top: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+.message-user .btn-toggle-expand-inline {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.message-user .btn-toggle-expand-inline:hover {
+  color: #a5b4fc;
+}
+
+.message-assistant .btn-toggle-expand-inline {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message-assistant .btn-toggle-expand-inline:hover {
   color: #fff;
-  transform: translateY(-1px);
 }
 
 /* 品牌头部右上角布局重构 */
@@ -2525,5 +2720,106 @@ onUnmounted(() => {
   font-size: 11px;
   font-weight: bold;
   color: #a5b4fc;
+}
+
+/* API Key 隔离绑定面板玻璃态样式 */
+.key-binding-panel {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.key-panel-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+
+.key-mode-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+}
+
+.key-mode-badge.bound {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+.key-mode-badge.ip-mode {
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.15);
+}
+
+.key-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.key-input-wrapper {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.key-input {
+  width: 100%;
+  padding: 6px 28px 6px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 11px;
+  outline: none;
+  transition: all 0.3s ease;
+}
+
+.key-input:focus {
+  border-color: #6366f1;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.btn-toggle-eye {
+  position: absolute;
+  right: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  opacity: 0.6;
+  transition: opacity 0.2s ease;
+}
+
+.btn-toggle-eye:hover {
+  opacity: 1;
+}
+
+.btn-apply-key {
+  padding: 6px 10px;
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  color: #a5b4fc;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  outline: none;
+}
+
+.btn-apply-key:hover {
+  background: rgba(99, 102, 241, 0.3);
+  border-color: #6366f1;
+  color: #fff;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
 }
 </style>

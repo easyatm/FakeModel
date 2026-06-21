@@ -65,6 +65,19 @@
                 "isDefault": false
             },
             "problemMatcher": []
+        },
+        {
+            "label": "打包发布源码压缩包 (tar.gz)",
+            "type": "shell",
+            "command": "npm run pack-tar",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
         }
     ]
 }

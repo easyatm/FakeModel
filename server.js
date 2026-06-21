@@ -11,6 +11,65 @@ const public_dir = path.join(__dirname, 'public');
 // 本地会话持久化存储文件路径
 const sessions_file_path = './sessions.json';
 
+/**
+ * 净化 IP 地址，处理 IPv6 映射以及本地环回地址
+ * @param {string} ip - 原始 IP 地址
+ * @returns {string} 净化后的 IP 地址
+ */
+function clean_ip_address(ip) {
+    if (!ip) return '127.0.0.1';
+    // 兼容本地环回
+    if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+        return '127.0.0.1';
+    }
+    // 兼容 IPv4 映射 IPv6 格式
+    if (ip.startsWith('::ffff:')) {
+        return ip.slice(7);
+    }
+    return ip;
+}
+
+/**
+ * 从 HTTP 请求头、Query 参数或 Body 数据中提取 API Key 用于认证和绑定
+ * @param {http.IncomingMessage} req - HTTP 请求对象
+ * @param {object} body_data - 解析后的 POST JSON 载荷
+ * @returns {string|null} 提取出的 API Key 或者是 null
+ */
+function extract_api_key(req, body_data) {
+    // 1. 优先从 Authorization 请求头提取 Bearer 凭证
+    const auth_header = req.headers['authorization'];
+    if (auth_header) {
+        if (auth_header.toLowerCase().startsWith('bearer ')) {
+            return auth_header.slice(7).trim();
+        }
+        return auth_header.trim();
+    }
+    
+    // 2. 其次尝试从 URL 查询参数中获取 key / api_key 属性
+    if (req.url && req.url.includes('?')) {
+        try {
+            const parsed_url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+            const query_key = parsed_url.searchParams.get('key') || parsed_url.searchParams.get('api_key');
+            if (query_key) {
+                return query_key.trim();
+            }
+        } catch (e) {
+            // 忽略 URL 解析异常
+        }
+    }
+    
+    // 3. 最后尝试从 JSON 载荷 Body 中获取 key / api_key 字段
+    if (body_data) {
+        const body_key = body_data.key || body_data.api_key;
+        if (body_key) {
+            return String(body_key).trim();
+        }
+    }
+    
+    return null;
+}
+
+
 // 人工回复同步事件类，模拟 Windows 原生事件机制以进行线程/协程同步
 class manual_event {
     constructor() {
@@ -136,7 +195,64 @@ function load_sessions_from_local() {
 // 自动加载本地的历史对话记录
 load_sessions_from_local();
 
-// 广播消息给所有已连接的前端页面
+// 针对特定会话进行可见性安全过滤，分发广播会话更新事件给有权限的前端控制台
+function broadcast_session_event(event_type, session) {
+    const session_key = session.session_key;
+    const session_ip = session.client_ip;
+
+    for (const ws_client of ws_clients) {
+        if (ws_client.readyState !== 1) continue;
+
+        let is_authorized = false;
+        if (session_key) {
+            // 如果会话绑定了 Key，只有拥有相同 Key 绑定的前端有权接收
+            is_authorized = (ws_client.bind_key === session_key);
+        } else {
+            // 如果会话是无 Key 状态，只有无 Key 连接且 IP 相同的前端有权接收 (IP 绑定隔离)
+            is_authorized = (!ws_client.bind_key && ws_client.client_ip === session_ip);
+        }
+
+        if (is_authorized) {
+            ws_client.send(JSON.stringify({
+                type: event_type,
+                session: get_session_payload(session),
+                session_id: session.session_id
+            }));
+        }
+    }
+}
+
+// 检查是否存在符合 API Key 或客户端 IP 绑定条件的活跃控制台连接
+function has_active_gui_connection(session_key, client_ip) {
+    for (const ws_client of ws_clients) {
+        if (ws_client.readyState !== 1) continue;
+
+        if (session_key) {
+            if (ws_client.bind_key === session_key) return true;
+        } else {
+            if (!ws_client.bind_key && ws_client.client_ip === client_ip) return true;
+        }
+    }
+    return false;
+}
+
+// 获取某个前端控制台有权访问的安全会话列表
+function get_authorized_sessions_for_client(ws_client) {
+    const bind_key = ws_client.bind_key;
+    const client_ip = ws_client.client_ip;
+
+    return active_sessions
+        .filter(session => {
+            if (session.session_key) {
+                return session.session_key === bind_key;
+            } else {
+                return (!bind_key && session.client_ip === client_ip);
+            }
+        })
+        .map(session => get_session_payload(session));
+}
+
+// 广播消息给所有已连接的前端页面（保留用于某些全局通知，主要逻辑已由隔离版 broadcast_session_event 接管）
 function broadcast_message(message_data) {
     const raw_data = JSON.stringify(message_data);
     for (const ws_client of ws_clients) {
@@ -146,10 +262,12 @@ function broadcast_message(message_data) {
     }
 }
 
-// 获取用于 WebSocket 广播传输的安全会话数据载荷 (排除 http 连接和事件等循环大对象)
+// 获取用于 WebSocket 广播传输的安全会话数据载荷 (排除 http 连接和事件等循环大对象，加入隔离绑定标识)
 function get_session_payload(session) {
     return {
         session_id: session.session_id,
+        session_key: session.session_key || null,
+        client_ip: session.client_ip || '127.0.0.1',
         messages: session.messages,
         is_waiting: session.is_waiting,
         stream: session.stream,
@@ -274,7 +392,8 @@ async function handle_http_request(req, res) {
     }
 
     // 只处理 /v1/chat/completions 核心路由
-    if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+    const req_path = req.url.split('?')[0];
+    if (req.method === 'POST' && req_path === '/v1/chat/completions') {
         try {
             const body_data = await parse_post_data(req);
             const { messages, stream = false, model = 'unknown', tools = [] } = body_data;
@@ -285,7 +404,69 @@ async function handle_http_request(req, res) {
                 return;
             }
 
-            // 检查 messages 数组的第一个元素，如果是 role === 'assistant'，将其角色变更为 'system'
+            // 提取客户端 Key 与 IP 绑定属性
+            const session_key = extract_api_key(req, body_data);
+            const client_ip = clean_ip_address(req.socket.remoteAddress);
+
+            // 当请求客户端发起对话时，检查是否有对应绑定的 GUI 连接
+            if (!has_active_gui_connection(session_key, client_ip)) {
+                console.log(`【拦截】客户端请求 (Key: ${session_key || '无'}, IP: ${client_ip}) 发起对话失败：未检测到对应的 GUI 控制台在线连接。`);
+                
+                // 动态获取请求的 Host 并构建服务基础地址
+                const request_host = req.headers.host || `localhost:${listen_port}`;
+                const server_url = `http://${request_host}`;
+
+                const warning_msg = session_key
+                    ? `# ⚠️ FakeModel 警告 / Warning\n\n未检测到绑定的前端控制台连接。您的客户端请求携带了 API Key：\n\`${session_key}\`\n\n**请按照以下步骤操作：**\n1. 确保您的网页控制中心（[${server_url}](${server_url})）处于打开且已连接状态。\n2. 在网页控制中心顶部 **"API Key 隔离绑定"** 栏输入上面完整的 API Key。\n3. 点击 **"应用"** 按钮以激活接管通道。\n\n*💡 提示：若您不想配置 Key，也可在两端均不填写 Key，系统将自动使用双方请求的 IP 地址进行通道绑定。*\n\n---\n\nNo bound frontend console connection detected. Your client request carried API Key:\n\`${session_key}\`\n\n**Please follow these steps:**\n1. Ensure your web control center ([${server_url}](${server_url})) is open and connected.\n2. Enter the complete API Key above into the **"API Key Binding"** field at the top of the control center.\n3. Click the **"Apply"** button to activate the takeover channel.\n\n*💡 Tip: If you prefer not to use an API Key, you can leave it blank on both sides. The system will automatically use the IP addresses to bind the channel.*`
+                    : `# ⚠️ FakeModel 警告 / Warning\n\n未检测到绑定的前端控制台连接。您的客户端请求**未携带 API Key**，系统默认使用 **IP 隔离绑定模式**。\n\n**请按照以下步骤操作：**\n1. 确保您的网页控制中心（[${server_url}](${server_url})）已开启 WebSocket 连接。\n2. 确保您的网页端与客户端处于相同的 IP 网络环境。当前检测到的客户端 IP 为：\`${client_ip}\`。\n3. 网页端当前不能绑定 any API Key（保持为空，显示 IP 隔离模式），即可开始接收会话。\n\n---\n\nNo bound frontend console connection detected. Your client request **did not carry an API Key**. The system defaults to **IP Binding Mode**.\n\n**Please follow these steps:**\n1. Ensure your web control center ([${server_url}](${server_url})) has an active WebSocket connection.\n2. Ensure your web browser and client are in the same IP environment. Detected client IP: \`${client_ip}\`.\n3. The API Key field in the web UI must be kept empty (IP Isolation mode) to receive these sessions.`;
+                
+                if (stream) {
+                    res.writeHead(200, {
+                        'Content-Type': 'text/event-stream',
+                        'Cache-Control': 'no-cache',
+                        'Connection': 'keep-alive'
+                    });
+                    
+                    const payload = {
+                        id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                        object: "chat.completion.chunk",
+                        created: Math.floor(Date.now() / 1000),
+                        model: "fake-model-warning",
+                        choices: [
+                            {
+                                index: 0,
+                                delta: { content: warning_msg },
+                                finish_reason: "stop"
+                            }
+                        ]
+                    };
+                    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+                    res.write(`data: [DONE]\n\n`);
+                    res.end();
+                } else {
+                    const response_json = {
+                        id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                        object: "chat.completion",
+                        created: Math.floor(Date.now() / 1000),
+                        model: "fake-model-warning",
+                        choices: [
+                            {
+                                index: 0,
+                                message: {
+                                    role: "assistant",
+                                    content: warning_msg
+                                },
+                                finish_reason: "stop"
+                            }
+                        ]
+                    };
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(response_json));
+                }
+                return;
+            }
+
+            // 检查 messages 数组 the 第一个元素，如果是 role === 'assistant'，将其角色变更为 'system'
             if (messages.length > 0 && messages[0].role === 'assistant') {
                 messages[0].role = 'system';
             }
@@ -313,11 +494,8 @@ async function handle_http_request(req, res) {
                 target_session.current_http_res = res;
                 target_session.current_event = client_event;
 
-                // 广播更新通知给前端
-                broadcast_message({
-                    type: "session_updated",
-                    session: get_session_payload(target_session)
-                });
+                // 广播更新通知给符合可见性权限的前端
+                broadcast_session_event("session_updated", target_session);
                 // 同步本地存储存盘
                 save_sessions_to_local();
             } else {
@@ -327,6 +505,8 @@ async function handle_http_request(req, res) {
                 
                 target_session = {
                     session_id: session_id,
+                    session_key: session_key,
+                    client_ip: client_ip,
                     messages: messages,
                     is_waiting: true,
                     stream: stream,
@@ -338,11 +518,8 @@ async function handle_http_request(req, res) {
                 };
                 active_sessions.push(target_session);
 
-                // 广播新建通知给前端
-                broadcast_message({
-                    type: "new_session",
-                    session: get_session_payload(target_session)
-                });
+                // 广播新建通知给符合可见性权限的前端
+                broadcast_session_event("new_session", target_session);
                 // 同步本地存储存盘
                 save_sessions_to_local();
             }
@@ -363,10 +540,7 @@ async function handle_http_request(req, res) {
                     client_event.trigger_event(null);
 
                     // 广播给前端并同步写入本地 sessions.json
-                    broadcast_message({
-                        type: "client_disconnected",
-                        session_id: target_session.session_id
-                    });
+                    broadcast_session_event("client_disconnected", target_session);
                     save_sessions_to_local();
                 } else {
                     console.log(`HTTP 响应正常释放或传输完毕后关闭，会话ID: ${target_session.session_id}`);
@@ -378,10 +552,7 @@ async function handle_http_request(req, res) {
                         target_session.current_http_res = null;
 
                         // 广播最新状态给前端
-                        broadcast_message({
-                            type: "session_updated",
-                            session: get_session_payload(target_session)
-                        });
+                        broadcast_session_event("session_updated", target_session);
                         save_sessions_to_local();
                     }
                 }
@@ -415,10 +586,7 @@ async function handle_http_request(req, res) {
                     // 立即广播消息和“对话中...”状态，此时 is_waiting 为 true，锁定前端发送状态直到流式结束
                     target_session.is_waiting = true;
                     target_session.status = 'active';
-                    broadcast_message({
-                        type: "session_updated",
-                        session: get_session_payload(target_session)
-                    });
+                    broadcast_session_event("session_updated", target_session);
                     save_sessions_to_local();
 
                     // 按标点/空格切分消息并逐步输出给客户端
@@ -430,10 +598,7 @@ async function handle_http_request(req, res) {
                         target_session.is_waiting = false;
 
                         // 广播消息更新通知给前端，使前端脱离发送等待状态，恢复可编辑模式
-                        broadcast_message({
-                            type: "session_updated",
-                            session: get_session_payload(target_session)
-                        });
+                        broadcast_session_event("session_updated", target_session);
                         // 客服本次回复成功写入流并记录，更新本地存盘
                         save_sessions_to_local();
 
@@ -472,10 +637,7 @@ async function handle_http_request(req, res) {
                     target_session.status = 'replied';
 
                     // 正常非流式回复完毕后，向前端广播最新状态
-                    broadcast_message({
-                        type: "session_updated",
-                        session: get_session_payload(target_session)
-                    });
+                    broadcast_session_event("session_updated", target_session);
 
                     // 成功完成一轮，存入本地
                     save_sessions_to_local();
@@ -560,14 +722,33 @@ async function handle_http_request(req, res) {
 }
 
 // 处理前端 WebSocket 消息通信
-function handle_ws_connection(ws_socket) {
-    console.log("前端控制台已建立 WebSocket 连接。");
+function handle_ws_connection(ws_socket, req) {
+    let bind_key = null;
+    let client_ip = '127.0.0.1';
+
+    try {
+        if (req) {
+            const parsed_url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+            bind_key = parsed_url.searchParams.get('key') || null;
+            if (bind_key === '') bind_key = null;
+            
+            client_ip = clean_ip_address(req.socket.remoteAddress);
+        }
+    } catch (err) {
+        console.error("解析 WebSocket 连接凭证与 IP 参数失败:", err);
+    }
+
+    // 挂载连接专有的隔离绑定凭证及 IP 信息
+    ws_socket.bind_key = bind_key;
+    ws_socket.client_ip = client_ip;
+
+    console.log(`前端控制台已建立 WebSocket 连接。绑定Key: ${bind_key || '无'}, 来源IP: ${client_ip}`);
     ws_clients.add(ws_socket);
 
-    // 连接成功后，立即把现有的历史会话同步过去
+    // 连接成功后，仅将该前端有权查看的隔离会话列表同步过去
     ws_socket.send(JSON.stringify({
         type: "session_list",
-        sessions: get_safe_sessions()
+        sessions: get_authorized_sessions_for_client(ws_socket)
     }));
 
     // 处理来自前端的操作指令
@@ -594,10 +775,7 @@ function handle_ws_connection(ws_socket) {
                     if (session.current_event) {
                         session.current_event.trigger_event(null);
                     }
-                    broadcast_message({
-                        type: "session_updated",
-                        session: get_session_payload(session)
-                    });
+                    broadcast_session_event("session_updated", session);
                     // 手动结束会话，同步存盘
                     save_sessions_to_local();
                 }
@@ -615,29 +793,50 @@ function handle_ws_connection(ws_socket) {
                     // 同步写入本地
                     save_sessions_to_local();
 
-                    // 广播全量更新列表给所有前端
-                    broadcast_message({
-                        type: "session_list",
-                        sessions: get_safe_sessions()
-                    });
+                    // 分别向每个在线的前端重新广播各自有权查看的最新会话列表
+                    for (const client of ws_clients) {
+                        if (client.readyState === 1) {
+                            client.send(JSON.stringify({
+                                type: "session_list",
+                                sessions: get_authorized_sessions_for_client(client)
+                            }));
+                        }
+                    }
                 }
             } else if (type === 'clear_all_sessions') {
-                console.log("收到前端清空所有会话指令，开始清除所有数据并通知客户端。");
-                // 释放所有当前可能被挂起的人工回复事件
-                active_sessions.forEach(session => {
+                console.log(`收到前端清空会话指令。发起端绑定Key: ${ws_socket.bind_key || '无'}, 来源IP: ${ws_socket.client_ip}`);
+                
+                // 仅过滤出当前前端拥有隔离访问权限的会话进行清除，实现多前端防越权清空
+                const target_sessions_to_clear = active_sessions.filter(session => {
+                    if (session.session_key) {
+                        return session.session_key === ws_socket.bind_key;
+                    } else {
+                        return (!ws_socket.bind_key && session.client_ip === ws_socket.client_ip);
+                    }
+                });
+
+                target_sessions_to_clear.forEach(session => {
                     if (session.current_event) {
                         session.current_event.trigger_event(null);
                     }
+                    const index = active_sessions.indexOf(session);
+                    if (index !== -1) {
+                        active_sessions.splice(index, 1);
+                    }
                 });
-                active_sessions.length = 0; // 清空内存数组
                 
-                // 同步清空本地 sessions.json 文件内容并广播
+                // 同步清空后写入本地 sessions.json 存盘
                 save_sessions_to_local();
                 
-                broadcast_message({
-                    type: "session_list",
-                    sessions: []
-                });
+                // 重新向每个在线的前端分发它们各自有权查看的最新会话列表
+                for (const client of ws_clients) {
+                    if (client.readyState === 1) {
+                        client.send(JSON.stringify({
+                            type: "session_list",
+                            sessions: get_authorized_sessions_for_client(client)
+                        }));
+                    }
+                }
             }
         } catch (error) {
             console.error("处理 WebSocket 消息异常:", error);
@@ -651,17 +850,52 @@ function handle_ws_connection(ws_socket) {
     });
 }
 
+// 解析命令行参数或环境变量以动态决定端口号（默认为 3000）
+// 支持以下传参方式：
+// 1. 命令行参数：node server.js --port 8080 或 node server.js -p 8080 或 node server.js 8080
+// 2. 环境变量：PORT=8080 node server.js
+function get_listen_port() {
+    // 优先从环境变量获取
+    if (process.env.PORT) {
+        const port = parseInt(process.env.PORT, 10);
+        if (!isNaN(port) && port > 0 && port < 65536) {
+            return port;
+        }
+    }
+    
+    // 其次从命令行参数获取
+    const args = process.argv.slice(2);
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--port' || args[i] === '-p') {
+            if (args[i + 1]) {
+                const port = parseInt(args[i + 1], 10);
+                if (!isNaN(port) && port > 0 && port < 65536) {
+                    return port;
+                }
+            }
+        }
+    }
+    
+    // 支持纯数字的裸参数传参，如 node server.js 8080
+    for (const arg of args) {
+        if (/^\d+$/.test(arg)) {
+            const port = parseInt(arg, 10);
+            if (port > 0 && port < 65536) {
+                return port;
+            }
+        }
+    }
+    
+    return 3001;
+}
+
 // 服务监听的端口号常量
-const listen_port = 3000;
+const listen_port = get_listen_port();
 
 // 创建 HTTP 服务，供 API 客户端 and 前端 WebSocket 共享端口
 const server_instance = http.createServer(handle_http_request);
 
-// 绑定 WebSocket 服务到同一个 HTTP 端口
-const wss_server = new WebSocketServer({ server: server_instance });
-wss_server.on('connection', handle_ws_connection);
-
-// 捕获服务运行或启动时的异常，特别是端口占用的情况，给以友好的中文错误提示
+// 捕获服务运行或启动时的异常，特别是端口占用的情况，给以友好的中英双语错误提示
 server_instance.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
         console.error(`\n=========================================`);
@@ -669,19 +903,40 @@ server_instance.on('error', (err) => {
         console.error(`请检查是否有其他 FakeModel 服务实例正在运行。`);
         console.error(`您可以稍等片刻（等待系统回收 TIME_WAIT 状态），或者`);
         console.error(`杀死占用该端口的进程后重新启动。`);
+        console.error(`-----------------------------------------`);
+        console.error(`[Start Failed] Error: Port ${listen_port} is already in use!`);
+        console.error(`Please check if another FakeModel instance is running.`);
+        console.error(`Please wait a moment for the system to reclaim TIME_WAIT state, or`);
+        console.error(`terminate the process using this port and restart.`);
         console.error(`=========================================\n`);
         process.exit(1);
     } else {
-        console.error("服务器发生未预期错误:", err);
+        console.error(`\n=========================================`);
+        console.error(`【服务器启动异常】错误信息: ${err.message || err}`);
+        console.error(`-----------------------------------------`);
+        console.error(`[Server Start Exception] Error: ${err.message || err}`);
+        console.error(`=========================================\n`);
+        process.exit(1);
     }
 });
+
+// 绑定 WebSocket 服务 to 同一个 HTTP 端口，并设置错误捕获以防止抛出未处理异常
+const wss_server = new WebSocketServer({ server: server_instance });
+wss_server.on('error', (err) => {
+    // 忽略与 http 服务端口冲突相关的报错（http 服务的 error 已经进行了退出并友好提示）
+    if (err.code === 'EADDRINUSE') {
+        return;
+    }
+    console.error("【WebSocket 异常】/ [WebSocket Exception]:", err.message || err);
+});
+wss_server.on('connection', handle_ws_connection);
 
 // 启动服务并监听端口
 server_instance.listen(listen_port, () => {
     console.log(`=========================================`);
-    console.log(`FakeModel 服务成功启动！`);
-    console.log(`API 代理请求地址 : http://localhost:${listen_port}/v1/chat/completions`);
-    console.log(`网页接管控制台地址: http://localhost:${listen_port}`);
-    console.log(`WebSocket 通信端口 : 绑定在相同端口 ${listen_port} 的 http 服务上`);
+    console.log(`FakeModel 服务成功启动！/ FakeModel Service Started Successfully!`);
+    console.log(`API 代理请求地址 / API Proxy URL         : http://localhost:${listen_port}/v1/chat/completions`);
+    console.log(`网页接管控制台地址 / Web Control Panel URL: http://localhost:${listen_port}`);
+    console.log(`WebSocket 通信端口 / WebSocket Port       : 绑定在相同端口 ${listen_port} 的 http 服务上 / Bound to same http port ${listen_port}`);
     console.log(`=========================================`);
 });

@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 
 // 建立与 FakeModel 后端的 WebSocket 连接
-const ws_url = 'ws://localhost:3000';
+const ws_url = 'ws://localhost:3001';
 console.log(`[前端模拟器] 正在连接 WebSocket: ${ws_url}`);
 const ws_connection = new WebSocket(ws_url);
 

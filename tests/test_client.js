@@ -55,7 +55,7 @@ function send_chat_request(is_stream = true, messages_history = [], on_complete 
 
     const request_options = {
         hostname: 'localhost',
-        port: 3000,
+        port: 3001,
         path: '/v1/chat/completions',
         method: 'POST',
         headers: {
