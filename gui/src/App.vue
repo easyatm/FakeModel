@@ -132,17 +132,25 @@
 
       <!-- 会话卡片列表 -->
       <div class="sessions-list">
+        <!-- 待处理活跃会话 -->
         <div 
-          v-for="session in filtered_sessions" 
+          v-for="session in active_filtered_sessions" 
           :key="session.session_id"
           class="session-card"
           :class="{ active: session.session_id === active_session_id, 'waiting-card': session.status === 'waiting' }"
           @click="select_session(session.session_id)"
         >
-          <div class="card-header">
-            <span class="session-label">{{ t('session_label') }} #{{ session.session_id.startsWith('session_') ? session.session_id.substring(8, 14) : session.session_id }}</span>
+          <!-- 第1行：ID、工具数、状态与动作 -->
+          <div class="card-row-first">
+            <span class="session-id-label">{{ format_session_id(session.session_id) }}</span>
             <div class="card-header-actions">
-              <span class="stream-badge" v-if="session.stream">{{ t('stream_badge') }}</span>
+              <span class="meta-tools" v-if="session.tools && session.tools.length > 0">🛠️ {{ session.tools.length }}</span>
+              <span class="status-badge" :class="session.status === 'waiting' ? 'waiting' : (session.status === 'active' ? 'replied' : 'ended')">
+                {{ 
+                  session.status === 'waiting' ? '● ' + t('status_waiting') : 
+                  session.status === 'active' ? t('status_active') : t('status_ended') 
+                }}
+              </span>
               <!-- 单个删除按钮：使用 stop 阻止冒泡防止选中 -->
               <button 
                 class="btn-delete-card" 
@@ -154,23 +162,53 @@
             </div>
           </div>
           
-          <div class="card-preview">
-            {{ get_session_preview(session) }}
+          <!-- 第2行：对话概要 -->
+          <div class="card-row-second" :title="get_session_summary_full(session)">
+            {{ get_session_summary_full(session) }}
           </div>
+        </div>
 
-          <!-- 模型与工具信息行 -->
-          <div class="card-meta-info">
-            <span class="meta-model" :title="session.model">🤖 {{ session.model || t('unknown_model') }}</span>
-            <span class="meta-tools" v-if="session.tools && session.tools.length > 0">🛠️ {{ session.tools.length }}</span>
+        <!-- 活跃会话与历史会话之间的视觉分割线 -->
+        <div 
+          v-if="active_filtered_sessions.length > 0 && ended_filtered_sessions.length > 0" 
+          class="sessions-group-divider"
+        >
+          <span>{{ t('divider_history_sessions') }}</span>
+        </div>
+
+        <!-- 已结束历史会话 -->
+        <div 
+          v-for="session in ended_filtered_sessions" 
+          :key="session.session_id"
+          class="session-card ended-card"
+          :class="{ active: session.session_id === active_session_id }"
+          @click="select_session(session.session_id)"
+        >
+          <!-- 第1行：ID、工具数、状态与动作 -->
+          <div class="card-row-first">
+            <span class="session-id-label">{{ format_session_id(session.session_id) }}</span>
+            <div class="card-header-actions">
+              <span class="meta-tools" v-if="session.tools && session.tools.length > 0">🛠️ {{ session.tools.length }}</span>
+              <span class="status-badge" :class="session.status === 'waiting' ? 'waiting' : (session.status === 'active' ? 'replied' : 'ended')">
+                {{ 
+                  session.status === 'waiting' ? '● ' + t('status_waiting') : 
+                  session.status === 'active' ? t('status_active') : t('status_ended') 
+                }}
+              </span>
+              <!-- 单个删除按钮：使用 stop 阻止冒泡防止选中 -->
+              <button 
+                class="btn-delete-card" 
+                @click.stop="delete_session_locally(session.session_id)"
+                :title="t('delete_session_title')"
+              >
+                🗑️
+              </button>
+            </div>
           </div>
-
-          <div class="card-footer">
-            <span class="status-badge" :class="session.status === 'waiting' ? 'waiting' : (session.status === 'active' ? 'replied' : 'ended')">
-              {{ 
-                session.status === 'waiting' ? '● ' + t('status_waiting') : 
-                session.status === 'active' ? t('status_active') : t('status_ended') 
-              }}
-            </span>
+          
+          <!-- 第2行：对话概要 -->
+          <div class="card-row-second" :title="get_session_summary_full(session)">
+            {{ get_session_summary_full(session) }}
           </div>
         </div>
 
@@ -188,7 +226,7 @@
         <!-- 对话头部状态栏 -->
         <header class="chat-header glass-panel">
           <div class="header-info">
-            <h3>{{ t('session_label') }} #{{ current_session.session_id }}</h3>
+            <h3>{{ t('session_label') }} {{ format_session_id(current_session.session_id) }}</h3>
             <span class="session-meta">
               {{ t('mode_prefix') }} {{ current_session.stream ? t('mode_sse') : t('mode_json') }}
             </span>
@@ -235,14 +273,26 @@
                   <!-- 泡泡主体：包裹文本与右下角控制按钮 -->
                   <div class="message-bubble-body">
                     <pre 
+                      v-if="msg.content"
                       :ref="el => set_message_text_ref(el, current_session.session_id + '_' + index)"
                       class="message-text"
                       :class="{ collapsed: !is_message_expanded(current_session.session_id, index) }"
                     >{{ msg.content }}</pre>
                     
+                    <!-- 工具调用外显卡片列表 -->
+                    <div class="message-tool-calls" v-if="msg.tool_calls && msg.tool_calls.length > 0">
+                      <div v-for="(tc, tc_idx) in msg.tool_calls" :key="tc_idx" class="tool-call-card">
+                        <div class="tool-call-header">
+                          <span class="tool-call-badge">⚙️ {{ t('tool_call_label') }}</span>
+                          <span class="tool-call-name highlight">{{ tc.function.name }}</span>
+                        </div>
+                        <pre class="tool-call-args">{{ format_json_string(tc.function.arguments) }}</pre>
+                      </div>
+                    </div>
+                    
                     <!-- 融合式折叠遮罩：当消息溢出且处于折叠状态时展示，自带底部渐变融合 -->
                     <div 
-                      v-if="overflowed_messages[current_session.session_id + '_' + index] && !is_message_expanded(current_session.session_id, index)"
+                      v-if="msg.content && overflowed_messages[current_session.session_id + '_' + index] && !is_message_expanded(current_session.session_id, index)"
                       class="message-text-fade-mask"
                       @click="toggle_message_expand(current_session.session_id, index)"
                     >
@@ -251,7 +301,7 @@
 
                     <!-- 融合式的内联收起按钮：当消息溢出且处于展开状态时在底部展示 -->
                     <button 
-                      v-else-if="overflowed_messages[current_session.session_id + '_' + index]"
+                      v-else-if="msg.content && overflowed_messages[current_session.session_id + '_' + index]"
                       class="btn-toggle-expand-inline"
                       @click="toggle_message_expand(current_session.session_id, index)"
                     >
@@ -274,15 +324,47 @@
             <!-- 底部人工输入与操作区 -->
             <footer class="chat-footer glass-panel">
               <div class="input-area">
+                <!-- 自动补全浮层 -->
+                <transition name="fade-scale">
+                  <div class="autocomplete-menu glass-panel" v-if="show_autocomplete && filtered_autocomplete_tools.length > 0">
+                    <div 
+                      v-for="(tool, t_idx) in filtered_autocomplete_tools" 
+                      :key="tool.function.name"
+                      class="autocomplete-item"
+                      :class="{ active: t_idx === autocomplete_active_index }"
+                      @click="select_autocomplete_tool(tool)"
+                    >
+                      <span class="autocomplete-tool-icon">⚡</span>
+                      <div class="autocomplete-tool-info">
+                        <div class="autocomplete-tool-name">{{ tool.function.name }}</div>
+                        <div class="autocomplete-tool-desc">{{ tool.function.description || t('tool_desc_empty') }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </transition>
+
                 <textarea 
                   ref="reply_input"
                   v-model="draft_replies[current_session.session_id]"
                   :placeholder="t('input_placeholder')"
                   class="reply-textarea"
                   :disabled="current_session.status === 'ended' || current_session.status === 'disconnected'"
+                  @input="handle_textarea_input"
+                  @keydown="handle_textarea_keydown"
                   @keydown.enter.exact.prevent="submit_reply(current_session.session_id)"
                   @keydown.enter.ctrl.prevent="submit_reply_and_end(current_session.session_id)"
                 ></textarea>
+
+                <!-- 快捷工具按钮工具栏 -->
+                <div class="input-toolbar" v-if="current_session.tools && current_session.tools.length > 0">
+                  <button 
+                    class="btn btn-secondary btn-sm btn-tool-shortcut" 
+                    @click="trigger_tool_shortcut"
+                    :title="t('autocomplete_placeholder')"
+                  >
+                    {{ t('btn_tool_call_shortcut') }}
+                  </button>
+                </div>
               </div>
             </footer>
           </div>
@@ -417,6 +499,120 @@
         </div>
       </div>
     </transition>
+
+    <!-- 工具函数可视化配置与选择对话框 (双栏检索版) -->
+    <transition name="fade-scale">
+      <div v-if="show_param_modal" class="modal-backdrop" @click="close_param_modal">
+        <div class="modal-card tool-call-modal-card glass-panel" @click.stop>
+          <header class="modal-card-header">
+            <span class="modal-title">⚙️ {{ t('modal_params_input') }}</span>
+            <button class="btn-close-modal" @click="close_param_modal">✕</button>
+          </header>
+          
+          <section class="modal-card-body tool-call-modal-body split-body">
+            <!-- 左栏：工具函数列表及快速检索 -->
+            <div class="modal-body-left tool-select-pane">
+              <div class="modal-search-box">
+                <input 
+                  v-model="modal_tool_search_query" 
+                  type="text" 
+                  :placeholder="t('tool_search_placeholder')"
+                  class="modal-search-input"
+                  ref="modal_search_input"
+                />
+              </div>
+              
+              <div class="modal-tools-list">
+                <div 
+                  v-for="tool in filtered_modal_tools" 
+                  :key="tool.function.name"
+                  class="modal-tool-item"
+                  :class="{ active: param_tool && param_tool.function.name === tool.function.name }"
+                  @click="select_modal_tool(tool)"
+                >
+                  <span class="tool-icon">⚡</span>
+                  <div class="modal-tool-info">
+                    <div class="modal-tool-name">{{ tool.function.name }}</div>
+                    <div class="modal-tool-desc">{{ tool.function.description || t('tool_desc_empty') }}</div>
+                  </div>
+                </div>
+                <div v-if="filtered_modal_tools.length === 0" class="tool-empty-state">
+                  {{ t('tool_empty') }}
+                </div>
+              </div>
+            </div>
+            
+            <!-- 右侧：动态参数配置表单 -->
+            <div class="modal-body-right param-config-pane">
+              <div v-if="param_tool" class="param-config-form">
+                <div class="selected-tool-header">
+                  <span class="selected-tool-name">{{ param_tool.function.name }}</span>
+                  <p class="selected-tool-desc" v-if="param_tool.function.description">{{ param_tool.function.description }}</p>
+                </div>
+                
+                <div class="param-form-container">
+                  <!-- 如果有参数，进行表单渲染 -->
+                  <template v-if="has_parameters(param_tool)">
+                    <div 
+                      v-for="(prop, prop_name) in param_tool.function.parameters.properties" 
+                      :key="prop_name" 
+                      class="param-form-item"
+                    >
+                      <label class="param-form-label">
+                        <span class="param-name">{{ prop_name }}</span>
+                        <span class="param-required-tag" v-if="is_parameter_required(param_tool, prop_name)">* {{ t('param_required') }}</span>
+                        <span class="param-type-badge">{{ prop.type }}</span>
+                      </label>
+                      
+                      <select 
+                        v-if="prop.type === 'boolean'" 
+                        v-model="param_values[prop_name]" 
+                        class="param-input-select"
+                      >
+                        <option :value="true">true</option>
+                        <option :value="false">false</option>
+                      </select>
+                      
+                      <textarea 
+                        v-else-if="prop.type === 'object' || prop.type === 'array'" 
+                        v-model="param_values[prop_name]" 
+                        placeholder='请输入合法的 JSON, 例如 {"key": "val"}' 
+                        class="param-input-textarea"
+                      ></textarea>
+                      
+                      <input 
+                        v-else 
+                        v-model="param_values[prop_name]" 
+                        type="text" 
+                        :placeholder="prop.description || ''" 
+                        class="param-input-text"
+                      />
+                      
+                      <span class="param-desc-text" v-if="prop.description && prop.type !== 'boolean'">{{ prop.description }}</span>
+                    </div>
+                  </template>
+                  <!-- 如果该函数免参数配置 -->
+                  <div v-else class="no-params-notice">
+                    💡 该工具函数无需配置参数。
+                  </div>
+                </div>
+              </div>
+              
+              <!-- 默认提示选择工具 -->
+              <div v-else class="param-empty-state">
+                <span class="param-empty-icon">👈</span>
+                <span class="param-empty-text">请在左侧选择需要调用的工具函数</span>
+              </div>
+            </div>
+          </section>
+          
+          <footer class="modal-card-footer">
+            <button class="btn btn-secondary btn-sm" @click="close_param_modal">{{ t('btn_cancel') }}</button>
+            <button class="btn btn-primary btn-sm" :disabled="!param_tool" @click="confirm_insert_call">{{ t('btn_insert_call') }}</button>
+          </footer>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -448,6 +644,24 @@ const selected_tool = ref(null);
 // 控制工具详情弹窗的开启与关闭
 const show_modal = ref(false);
 
+// 控制工具函数自动补全浮层的显示与隐藏
+const show_autocomplete = ref(false);
+// 自动补全过滤检索词
+const autocomplete_query = ref('');
+// 自动补全当前选中的项目索引
+const autocomplete_active_index = ref(0);
+
+// 控制工具函数参数配置模态窗的显示与隐藏
+const show_param_modal = ref(false);
+// 当前正在配置参数的工具函数对象
+const param_tool = ref(null);
+// 参数对应的值字典对象
+const param_values = ref({});
+// 弹窗中工具检索关键词
+const modal_tool_search_query = ref('');
+// 绑定搜索输入框引用
+const modal_search_input = ref(null);
+
 // 左右侧边栏初始宽度（单位：像素）
 const left_sidebar_width = ref(340);
 const right_sidebar_width = ref(280);
@@ -467,10 +681,53 @@ const lang_mode = ref('auto');
 // 复制操作成功状态标识
 const copy_success = ref(false);
 
+/**
+ * 格式化会话 ID 为日期时间格式
+ * 将 14 位数字的 ID (yymmddhhmmssnn) 或带有 "session_" 前缀的 ID 转换为 "20yy-mm-dd hh:mm:ss.nn" 格式
+ * @param {string} session_id - 原始会话 ID
+ * @returns {string} 格式化后的日期时间字符串
+ */
+function format_session_id(session_id) {
+  if (!session_id) return '';
+  
+  // 提取数字部分
+  let num_part = session_id;
+  if (session_id.startsWith('session_')) {
+    num_part = session_id.substring(8);
+  }
+  
+  // 验证提取出来的数字部分是否为 14 位
+  if (/^\d{14}$/.test(num_part)) {
+    const yy = num_part.substring(0, 2);
+    const mm = num_part.substring(2, 4);
+    const dd = num_part.substring(4, 6);
+    const hh = num_part.substring(6, 8);
+    const min = num_part.substring(8, 10);
+    const ss = num_part.substring(10, 12);
+    const nn = num_part.substring(12, 14);
+    
+    return `20${yy}-${mm}-${dd} ${hh}:${min}:${ss}.${nn}`;
+  }
+  
+  // 如果格式不符合 14 位数字，直接返回原 ID
+  return session_id;
+}
+
+/**
+ * 动态获取当前服务的真实端口，如果是开发端口 5173 则重定向为 3001
+ * @returns {string} 格式化后的端口部分，如 ":3001" 或 ""
+ */
+function get_service_port() {
+  let port = window.location.port || '';
+  if (port === '5173') {
+    port = '3001';
+  }
+  return port ? `:${port}` : '';
+}
+
 // 动态获取当前服务的 HTTP 地址前缀
 const server_url = computed(() => {
-  const current_port = window.location.port ? `:${window.location.port}` : '';
-  return `${window.location.protocol}//${window.location.hostname}${current_port}`;
+  return `${window.location.protocol}//${window.location.hostname}${get_service_port()}`;
 });
 
 // 用于会话隔离绑定的 API Key
@@ -499,8 +756,7 @@ function apply_key_binding() {
  * 一键复制 API 服务端地址到系统剪贴板
  */
 function copy_address_to_clipboard() {
-  const current_port = window.location.port ? `:${window.location.port}` : '';
-  const current_url = `${window.location.protocol}//${window.location.hostname}${current_port}/v1/chat/completions`;
+  const current_url = `${window.location.protocol}//${window.location.hostname}${get_service_port()}/v1/chat/completions`;
   navigator.clipboard.writeText(current_url)
     .then(() => {
       copy_success.value = true;
@@ -573,7 +829,15 @@ const locales = {
     bind_key_placeholder: "输入用于隔离的 API Key...",
     btn_apply_key: "应用",
     status_key_bound: "Key 隔离",
-    status_ip_bound: "IP 隔离"
+    status_ip_bound: "IP 隔离",
+    tool_call_label: "工具函数调用",
+    autocomplete_placeholder: "输入 / 触发工具自动补全",
+    modal_params_input: "配置工具函数参数",
+    btn_insert_call: "生成并插入",
+    btn_cancel: "取消",
+    param_required: "必填",
+    btn_tool_call_shortcut: "⚡ 调用工具",
+    divider_history_sessions: "已结束的历史会话"
   },
   en: {
     status_connected: "Service Connected",
@@ -629,7 +893,15 @@ const locales = {
     bind_key_placeholder: "Enter API Key...",
     btn_apply_key: "Apply",
     status_key_bound: "Key Mode",
-    status_ip_bound: "IP Mode"
+    status_ip_bound: "IP Mode",
+    tool_call_label: "Tool Call",
+    autocomplete_placeholder: "Type / to trigger tool autocomplete",
+    modal_params_input: "Configure Tool Parameters",
+    btn_insert_call: "Generate & Insert",
+    btn_cancel: "Cancel",
+    param_required: "Required",
+    btn_tool_call_shortcut: "⚡ Call Tool",
+    divider_history_sessions: "Ended History Sessions"
   }
 };
 
@@ -891,17 +1163,39 @@ const current_session = computed(() => {
   return sessions.value.find(s => s.session_id === active_session_id.value) || null;
 });
 
-// 计算属性：根据搜索关键词过滤会话列表
+// 计算属性：根据搜索关键词过滤会话列表，并按最新活跃时间 (updated_at) 和会话ID降序排列
 const filtered_sessions = computed(() => {
+  let list = [];
   if (!search_query.value.trim()) {
-    return sessions.value;
+    list = [...sessions.value];
+  } else {
+    const query = search_query.value.toLowerCase();
+    list = sessions.value.filter(session => {
+      // 匹配会话ID或任何消息内容
+      return session.session_id.toLowerCase().includes(query) || 
+             session.messages.some(msg => msg.content.toLowerCase().includes(query));
+    });
   }
-  const query = search_query.value.toLowerCase();
-  return sessions.value.filter(session => {
-    // 匹配会话ID或任何消息内容
-    return session.session_id.toLowerCase().includes(query) || 
-           session.messages.some(msg => msg.content.toLowerCase().includes(query));
+
+  // 排序：最新的 (updated_at 最大的，或者 session_id 降序) 排在最前
+  return list.sort((a, b) => {
+    if (a.updated_at && b.updated_at) {
+      return b.updated_at - a.updated_at;
+    }
+    if (a.updated_at) return -1;
+    if (b.updated_at) return 1;
+    return b.session_id.localeCompare(a.session_id);
   });
+});
+
+// 计算属性：仅过滤出待处理的活跃会话 (waiting, active)
+const active_filtered_sessions = computed(() => {
+  return filtered_sessions.value.filter(s => s.status === 'waiting' || s.status === 'active');
+});
+
+// 计算属性：仅过滤出已结束的会话 (ended, disconnected)
+const ended_filtered_sessions = computed(() => {
+  return filtered_sessions.value.filter(s => s.status === 'ended' || s.status === 'disconnected');
 });
 
 // 监听当前活跃会话的变化，自动将聊天区域滚动到底部
@@ -957,20 +1251,66 @@ function scroll_to_bottom() {
 }
 
 /**
- * 提取会话的最新一条用户消息作为列表卡片的预览摘要
+ * 提取对话客户端请求最新消息作为列表卡片的概要，支持 `<userRequest>` 过滤和工具反馈解析。
+ * 注意：此处过滤仅提取客户端发来的消息 (role 为 user 或 tool)，排除助理自身的回复。
  * @param {Object} session 会话对象
- * @returns {string} 消息摘要
+ * @returns {string} 格式化后的概要字符串
  */
-function get_session_preview(session) {
+function get_session_summary_full(session) {
   if (!session.messages || session.messages.length === 0) {
     return '暂无消息内容';
   }
-  // 查找最后一条用户消息
-  const user_messages = session.messages.filter(m => m.role === 'user');
-  if (user_messages.length > 0) {
-    return user_messages[user_messages.length - 1].content;
+  
+  // 从后往前寻找最后一条由客户端发来的消息 (role 为 'user' 或 'tool')
+  let client_msg = null;
+  let client_msg_idx = -1;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const msg = session.messages[i];
+    if (msg.role === 'user' || msg.role === 'tool') {
+      client_msg = msg;
+      client_msg_idx = i;
+      break;
+    }
   }
-  return session.messages[session.messages.length - 1].content;
+  
+  // 兜底：如果完全没有客户端消息（理论上不可能），则取最后一条
+  if (!client_msg) {
+    client_msg = session.messages[session.messages.length - 1];
+    client_msg_idx = session.messages.length - 1;
+  }
+  
+  // 1. 如果是客户端发来的函数调用反馈 (role === 'tool')
+  if (client_msg.role === 'tool') {
+    const func_name = client_msg.name || '未知函数';
+    let func_args = '';
+    
+    // 向上追溯，寻找对应的 assistant 发起的 tool_call，以拿到参数 arguments
+    if (client_msg.tool_call_id) {
+      for (let i = client_msg_idx - 1; i >= 0; i--) {
+        const msg = session.messages[i];
+        if (msg.role === 'assistant' && msg.tool_calls) {
+          const matched_call = msg.tool_calls.find(tc => tc.id === client_msg.tool_call_id);
+          if (matched_call) {
+            func_args = matched_call.function?.arguments || '';
+            break;
+          }
+        }
+      }
+    }
+    
+    const args_display = func_args ? ` 参数: ${func_args}` : '';
+    return `[函数调用反馈] 函数: ${func_name}${args_display}`;
+  }
+  
+  // 2. 如果是客户端发来的普通对话 (role === 'user')，检测并提取 <userRequest> 中的内容
+  const content = client_msg.content || '';
+  const request_match = content.match(/<userRequest>([\s\S]*?)<\/userRequest>/i);
+  if (request_match) {
+    return request_match[1].trim();
+  }
+  
+  // 3. 兜底返回完整内容
+  return content;
 }
 
 /**
@@ -992,6 +1332,300 @@ function select_session(session_id) {
 }
 
 /**
+ * 根据自动补全检索词过滤当前会话支持的工具函数
+ */
+const filtered_autocomplete_tools = computed(() => {
+  if (!current_session.value || !current_session.value.tools) {
+    return [];
+  }
+  const query = autocomplete_query.value.toLowerCase().trim();
+  if (!query) {
+    return current_session.value.tools;
+  }
+  return current_session.value.tools.filter(t => {
+    const name = t.function?.name || '';
+    const desc = t.function?.description || '';
+    return name.toLowerCase().includes(query) || desc.toLowerCase().includes(query);
+  });
+});
+
+/**
+ * 选中某个自动补全的工具函数，进入参数配置或直接插入
+ * @param {Object} tool - 选中的工具函数对象
+ */
+function select_autocomplete_tool(tool) {
+  show_autocomplete.value = false;
+  autocomplete_query.value = '';
+  
+  // 清空输入框中的触发字符 "/xxx" 或 "@xxx"
+  if (current_session.value && reply_input.value) {
+    const textarea = reply_input.value;
+    const text = draft_replies.value[current_session.value.session_id] || '';
+    const cursor_pos = textarea.selectionStart;
+    
+    // 寻找光标前的触发词，例如寻找最近的 / 或 @ 符号
+    const last_slash_idx = text.lastIndexOf('/', cursor_pos - 1);
+    const last_at_idx = text.lastIndexOf('@', cursor_pos - 1);
+    const trigger_idx = Math.max(last_slash_idx, last_at_idx);
+    
+    if (trigger_idx !== -1) {
+      const before_trigger = text.substring(0, trigger_idx);
+      const after_cursor = text.substring(cursor_pos);
+      draft_replies.value[current_session.value.session_id] = before_trigger + after_cursor;
+      
+      // 重置光标位置到插入点
+      nextTick(() => {
+        textarea.selectionStart = textarea.selectionEnd = trigger_idx;
+      });
+    }
+  }
+
+  const params = tool.function?.parameters;
+  const has_props = params && params.properties && Object.keys(params.properties).length > 0;
+  
+  if (!has_props) {
+    // 如果该函数没有参数，则直接在当前光标位置插入无参标记
+    insert_text_at_cursor(`[call:${tool.function.name}{}]`);
+  } else {
+    // 如果有参数，则开启参数配置弹窗
+    param_tool.value = tool;
+    param_values.value = {};
+    
+    // 赋初值
+    Object.keys(params.properties).forEach(k => {
+      const prop = params.properties[k];
+      if (prop.type === 'boolean') {
+        param_values.value[k] = false;
+      } else {
+        param_values.value[k] = '';
+      }
+    });
+    
+    show_param_modal.value = true;
+  }
+}
+
+/**
+ * 在输入框当前光标位置插入文本
+ * @param {string} text - 要插入的文本
+ */
+function insert_text_at_cursor(text) {
+  if (!current_session.value || !reply_input.value) return;
+  const textarea = reply_input.value;
+  const session_id = current_session.value.session_id;
+  const current_text = draft_replies.value[session_id] || '';
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  
+  draft_replies.value[session_id] = current_text.substring(0, start) + text + current_text.substring(end);
+  
+  nextTick(() => {
+    textarea.focus();
+    const new_pos = start + text.length;
+    textarea.selectionStart = textarea.selectionEnd = new_pos;
+  });
+}
+
+/**
+ * 监听输入框变化，实时判定是否触发工具函数自动补全
+ * @param {Event} event - 输入事件对象
+ */
+function handle_textarea_input(event) {
+  const text = event.target.value;
+  const cursor_pos = event.target.selectionStart;
+  
+  // 获取光标前的文本
+  const text_before_cursor = text.substring(0, cursor_pos);
+  
+  // 判定是否输入了 / 或者是 @，且它位于行首或者空格之后
+  const match = text_before_cursor.match(/(?:^|\s)([\/@])([^\s\/@]*)$/);
+  
+  if (match) {
+    show_autocomplete.value = true;
+    autocomplete_query.value = match[2];
+    autocomplete_active_index.value = 0;
+  } else {
+    show_autocomplete.value = false;
+    autocomplete_query.value = '';
+  }
+}
+
+/**
+ * 接管输入框在自动补全浮层打开时的键盘按键，进行辅助选择
+ * @param {KeyboardEvent} event - 键盘事件对象
+ */
+function handle_textarea_keydown(event) {
+  if (!show_autocomplete.value) return;
+  
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    autocomplete_active_index.value = (autocomplete_active_index.value + 1) % filtered_autocomplete_tools.value.length;
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    autocomplete_active_index.value = (autocomplete_active_index.value - 1 + filtered_autocomplete_tools.value.length) % filtered_autocomplete_tools.value.length;
+  } else if (event.key === 'Enter') {
+    if (filtered_autocomplete_tools.value.length > 0) {
+      event.preventDefault();
+      select_autocomplete_tool(filtered_autocomplete_tools.value[autocomplete_active_index.value]);
+    }
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    show_autocomplete.value = false;
+  }
+}
+
+/**
+ * 确认配置，生成 JSON 格式参数并在光标位置插入工具函数调用标记
+ */
+function confirm_insert_call() {
+  if (!param_tool.value) return;
+  const tool_name = param_tool.value.function.name;
+  const params = param_tool.value.function.parameters || {};
+  const properties = params.properties || {};
+  const required = params.required || [];
+  
+  // 验证必填项
+  for (const req_key of required) {
+    const val = param_values.value[req_key];
+    if (val === undefined || val === null || String(val).trim() === '') {
+      alert(`参数 ${req_key} 是必填项！`);
+      return;
+    }
+  }
+  
+  // 构建参数对象
+  const final_args = {};
+  Object.keys(properties).forEach(k => {
+    const val = param_values.value[k];
+    const type = properties[k].type;
+    
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      if (type === 'number' || type === 'integer') {
+        final_args[k] = Number(val);
+      } else if (type === 'boolean') {
+        final_args[k] = Boolean(val);
+      } else if (type === 'object' || type === 'array') {
+        try {
+          final_args[k] = typeof val === 'string' ? JSON.parse(val) : val;
+        } catch (e) {
+          console.warn("解析参数为对象失败，按原样发送：", val);
+          final_args[k] = val;
+        }
+      } else {
+        final_args[k] = String(val);
+      }
+    }
+  });
+  
+  const args_json = JSON.stringify(final_args);
+  insert_text_at_cursor(`[call:${tool_name}${args_json}]`);
+  
+  show_param_modal.value = false;
+  param_tool.value = null;
+}
+
+/**
+ * 格式化 JSON 字符串或对象为漂亮的 JSON 字符串输出
+ * @param {string|Object} str - 待格式化的 JSON 字符串或对象
+ * @returns {string} 格式化后的 JSON 字符串
+ */
+function format_json_string(str) {
+  if (!str) return '';
+  try {
+    const parsed = typeof str === 'string' ? JSON.parse(str) : str;
+    return JSON.stringify(parsed, null, 2);
+  } catch (e) {
+    return String(str);
+  }
+}
+
+// 弹窗过滤后的工具函数列表
+const filtered_modal_tools = computed(() => {
+  if (!current_session.value || !current_session.value.tools) {
+    return [];
+  }
+  if (!modal_tool_search_query.value.trim()) {
+    return current_session.value.tools;
+  }
+  const query = modal_tool_search_query.value.toLowerCase().trim();
+  return current_session.value.tools.filter(tool => {
+    const name = tool.function?.name || '';
+    const desc = tool.function?.description || '';
+    return name.toLowerCase().includes(query) || desc.toLowerCase().includes(query);
+  });
+});
+
+/**
+ * 在弹窗内选择工具函数，初始化参数输入值
+ * @param {Object} tool - 选中的工具函数对象
+ */
+function select_modal_tool(tool) {
+  param_tool.value = tool;
+  param_values.value = {};
+  
+  const params = tool.function?.parameters;
+  if (params && params.properties) {
+    Object.keys(params.properties).forEach(k => {
+      const prop = params.properties[k];
+      if (prop.type === 'boolean') {
+        param_values.value[k] = false;
+      } else {
+        param_values.value[k] = '';
+      }
+    });
+  }
+}
+
+/**
+ * 判断工具函数是否有参数
+ * @param {Object} tool - 工具函数对象
+ * @returns {boolean} 是否有参数
+ */
+function has_parameters(tool) {
+  const params = tool?.function?.parameters;
+  return params && params.properties && Object.keys(params.properties).length > 0;
+}
+
+/**
+ * 判断参数是否是必填的
+ * @param {Object} tool - 工具函数对象
+ * @param {string} prop_name - 参数字段名
+ * @returns {boolean} 是否必填
+ */
+function is_parameter_required(tool, prop_name) {
+  const params = tool?.function?.parameters;
+  return params && params.required && params.required.includes(prop_name);
+}
+
+/**
+ * 关闭参数配置弹窗，重置搜索条件
+ */
+function close_param_modal() {
+  show_param_modal.value = false;
+  param_tool.value = null;
+  modal_tool_search_query.value = '';
+}
+
+/**
+ * 点击快捷“调用工具”按钮直接弹出双栏配置对话框
+ */
+function trigger_tool_shortcut() {
+  if (!current_session.value || !current_session.value.tools || current_session.value.tools.length === 0) {
+    return;
+  }
+  modal_tool_search_query.value = '';
+  param_tool.value = null;
+  param_values.value = {};
+  show_param_modal.value = true;
+  
+  nextTick(() => {
+    if (modal_search_input.value) {
+      modal_search_input.value.focus();
+    }
+  });
+}
+
+/**
  * 人工提交回复内容给后端，并清空输入草稿
  * @param {string} session_id 会话ID
  */
@@ -1001,18 +1635,42 @@ function submit_reply(session_id) {
   if (!session || (session.status !== 'waiting' && session.status !== 'active') || is_submitting.value) {
     return;
   }
-  if (!content.trim() || !ws_socket || ws_socket.readyState !== WebSocket.OPEN) {
+
+  // 从输入草稿中解析工具函数调用标记并剥离
+  const tool_calls = [];
+  const call_regex = /\[call:(\w+)(\{.*?\})\]/g;
+  let match;
+  while ((match = call_regex.exec(content)) !== null) {
+    const tool_name = match[1];
+    const tool_args = match[2];
+    tool_calls.push({
+      id: "call_" + Math.random().toString(36).substr(2, 9),
+      type: "function",
+      function: {
+        name: tool_name,
+        arguments: tool_args
+      }
+    });
+  }
+
+  const content_without_calls = content.replace(/\[call:\w+\{.*?\}\]/g, '').trim();
+
+  const has_content = content_without_calls.length > 0;
+  const has_tools = tool_calls.length > 0;
+
+  if ((!has_content && !has_tools) || !ws_socket || ws_socket.readyState !== WebSocket.OPEN) {
     return;
   }
 
   // 开启发送状态锁，避免流式响应中重复发送
   is_submitting.value = true;
 
-  // 发送指令回复给后端
+  // 发送指令回复给后端，同时包含文字与工具调用
   ws_socket.send(JSON.stringify({
     type: 'send_reply',
     session_id: session_id,
-    content: content
+    content: content_without_calls,
+    tool_calls: tool_calls.length > 0 ? tool_calls : undefined
   }));
 
   // 发送后清空当前会话的草稿
@@ -1067,9 +1725,8 @@ function terminate_session(session_id) {
 function connect_to_server() {
   ws_status.value = 'connecting';
   
-  // 动态使用当前网页的端口建立 WS 连接
   const key_param = bind_key.value.trim() ? `?key=${encodeURIComponent(bind_key.value.trim())}` : '';
-  const current_port = window.location.port ? `:${window.location.port}` : '';
+  const current_port = get_service_port();
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws_socket = new WebSocket(`${protocol}//${window.location.hostname}${current_port}${key_param}`);
 
@@ -1374,15 +2031,15 @@ onUnmounted(() => {
 }
 
 .session-card {
-  padding: 16px;
+  padding: 12px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid rgba(255, 255, 255, 0.04);
-  border-radius: 12px;
+  border-radius: 10px;
   cursor: pointer;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   position: relative;
   overflow: hidden;
 }
@@ -1418,15 +2075,16 @@ onUnmounted(() => {
   }
 }
 
-.card-header {
+.card-row-first {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  width: 100%;
 }
 
-.session-label {
+.session-id-label {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: normal;
   color: #f8fafc;
 }
 
@@ -1438,15 +2096,68 @@ onUnmounted(() => {
 
 .stream-badge {
   font-size: 10px;
-  background: linear-gradient(135deg, #f59e0b, #d97706);
-  color: #fff;
-  padding: 2px 6px;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px solid rgba(245, 158, 11, 0.20);
+  color: #f59e0b;
+  padding: 1px 4px;
   border-radius: 4px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
-/* 单个删除按钮 */
+/* 已结束的历史卡片弱化样式 */
+.session-card.ended-card {
+  opacity: 0.5;
+  background: rgba(255, 255, 255, 0.005);
+  border-color: rgba(255, 255, 255, 0.02);
+}
+
+.session-card.ended-card:hover {
+  opacity: 0.8;
+  background: rgba(255, 255, 255, 0.02);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.session-card.ended-card .session-id-label {
+  color: #64748b;
+}
+
+.session-card.ended-card .card-row-second {
+  color: #475569;
+}
+
+/* 活跃会话与历史会话视觉分割线 */
+.sessions-group-divider {
+  display: flex;
+  align-items: center;
+  margin: 14px 0 8px 0;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sessions-group-divider::before,
+.sessions-group-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sessions-group-divider::before {
+  margin-right: 8px;
+}
+
+.sessions-group-divider::after {
+  margin-left: 8px;
+}
+
+/* 单个删除按钮：使用绝对定位脱离文档流，保证状态标签完美右对齐 */
 .btn-delete-card {
+  position: absolute;
+  right: 12px;
+  top: 10px;
   background: transparent;
   border: none;
   color: #64748b;
@@ -1456,11 +2167,14 @@ onUnmounted(() => {
   border-radius: 4px;
   transition: all 0.2s ease;
   opacity: 0; /* 默认隐藏，防杂乱 */
+  pointer-events: none; /* 隐藏时不可点击 */
   outline: none;
+  z-index: 5;
 }
 
 .session-card:hover .btn-delete-card {
   opacity: 1; /* 鼠标移入卡片时显现 */
+  pointer-events: auto; /* 显现时可点击 */
 }
 
 .btn-delete-card:hover {
@@ -1469,19 +2183,16 @@ onUnmounted(() => {
   transform: scale(1.1);
 }
 
-.card-preview {
+.card-row-second {
   font-size: 12px;
   color: #94a3b8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  width: 100%;
 }
 
-.card-footer {
-  display: flex;
-  justify-content: flex-end;
-}
-
+/* 状态标签增加过渡效果，在鼠标悬停时平滑隐藏 */
 .status-badge {
   font-size: 11px;
   font-weight: 500;
@@ -1489,6 +2200,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
+  transition: opacity 0.2s ease;
+}
+
+.session-card:hover .status-badge {
+  opacity: 0; /* 悬停时隐藏状态标签，避免与删除按钮重合 */
+  pointer-events: none;
 }
 
 .status-badge.waiting {
@@ -1541,6 +2258,7 @@ onUnmounted(() => {
 
 .chat-header h3 {
   font-size: 16px;
+  font-weight: normal;
   color: #fff;
 }
 
@@ -2130,12 +2848,12 @@ onUnmounted(() => {
 }
 
 .meta-tools {
-  background: rgba(99, 102, 241, 0.15);
-  color: #c084fc;
-  padding: 1px 5px;
+  background: rgba(167, 139, 250, 0.05);
+  color: #a78bfa;
+  padding: 1px 4px;
   border-radius: 4px;
-  font-weight: 600;
-  border: 1px solid rgba(99, 102, 241, 0.2);
+  font-weight: 500;
+  border: 1px solid rgba(167, 139, 250, 0.15);
 }
 
 /* 新增：聊天区域左右分栏布局 */
@@ -2821,5 +3539,454 @@ onUnmounted(() => {
   border-color: #6366f1;
   color: #fff;
   box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+/* ==========================================================================
+   工具函数自动补全浮层 (Autocomplete) 样式
+   ========================================================================== */
+.input-area {
+  position: relative; /* 为自动补全浮层提供定位基准 */
+}
+
+.autocomplete-menu {
+  position: absolute;
+  bottom: calc(100% + 10px); /* 定位于 textarea 的上方，留出 10px 间距 */
+  left: 0;
+  width: 100%;
+  max-height: 250px;
+  overflow-y: auto;
+  z-index: 100;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.85); /* 深色磨砂背景 */
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 -10px 25px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(99, 102, 241, 0.1);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.autocomplete-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  background: transparent;
+}
+
+.autocomplete-item:hover, .autocomplete-item.active {
+  background: rgba(99, 102, 241, 0.15); /* 选中/悬停高亮 */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.autocomplete-item.active .autocomplete-tool-name {
+  color: #a5b4fc;
+}
+
+.autocomplete-tool-icon {
+  font-size: 14px;
+  color: #f59e0b;
+  margin-top: 2px;
+  filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.4));
+}
+
+.autocomplete-tool-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.autocomplete-tool-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f8fafc;
+  font-family: monospace;
+}
+
+.autocomplete-tool-desc {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ==========================================================================
+   输入框底部快捷工具栏与按钮样式
+   ========================================================================== */
+.input-toolbar {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 8px; /* 微调与输入框的间距 */
+}
+
+.btn-tool-shortcut {
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+  border-radius: 6px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn-tool-shortcut:hover {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: #6366f1;
+  color: #fff;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ==========================================================================
+   消息气泡内工具函数调用卡片 (Tool Calls) 样式
+   ========================================================================== */
+.message-tool-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+.tool-call-card {
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  transition: border-color 0.2s ease;
+}
+
+.tool-call-card:hover {
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-call-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  letter-spacing: 0.03em;
+}
+
+.tool-call-name.highlight {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: #a5b4fc;
+}
+
+.tool-call-args {
+  margin: 0;
+  padding: 8px 12px;
+  background: #06090f;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-family: 'Fira Code', Consolas, Monaco, monospace;
+  font-size: 11px;
+  color: #34d399;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+}
+
+/* ==========================================================================
+   可视化参数配置配置弹窗样式 (双栏检索版)
+   ========================================================================== */
+.tool-call-modal-card {
+  width: 950px;
+  max-width: 95%;
+  max-height: 80vh;
+}
+
+.tool-call-modal-body.split-body {
+  display: flex;
+  flex-direction: row;
+  gap: 24px;
+  overflow: hidden;
+  height: 500px; /* 固定弹窗内容区域高度 */
+}
+
+/* 左侧：选择面板 */
+.tool-select-pane {
+  flex: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding-right: 20px;
+  overflow: hidden;
+}
+
+.modal-search-box {
+  width: 100%;
+}
+
+.modal-search-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.3s ease;
+}
+
+.modal-search-input:focus {
+  border-color: #6366f1;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+.modal-tools-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 6px;
+}
+
+.modal-tool-item {
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modal-tool-item:hover {
+  background: rgba(99, 102, 241, 0.08);
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+.modal-tool-item.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: #6366f1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.modal-tool-item.active .modal-tool-name {
+  color: #a5b4fc;
+}
+
+.modal-tool-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f8fafc;
+  font-family: monospace;
+}
+
+.modal-tool-desc {
+  font-size: 11px;
+  color: #64748b;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+/* 右侧：表单配置面板 */
+.param-config-pane {
+  flex: 6;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding-right: 8px;
+}
+
+.param-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.selected-tool-header {
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+  padding-bottom: 12px;
+}
+
+.selected-tool-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+  font-family: monospace;
+  background: linear-gradient(135deg, #a5b4fc, #c084fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.selected-tool-desc {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.no-params-notice {
+  padding: 24px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+/* 默认为空提示状态 */
+.param-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 16px;
+  min-height: 300px;
+  color: #4b5563;
+}
+
+.param-empty-icon {
+  font-size: 40px;
+  animation: bounce_horizontal 2s infinite ease-in-out;
+}
+
+@keyframes bounce_horizontal {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(-8px);
+  }
+}
+
+.param-empty-text {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.param-form-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.param-form-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.param-form-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.param-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  font-family: monospace;
+}
+
+.param-required-tag {
+  font-size: 10px;
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: bold;
+}
+
+.param-type-badge {
+  font-size: 10px;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+/* 各类参数输入控件 */
+.param-input-text, .param-input-select, .param-input-textarea {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.3s ease;
+  font-family: inherit;
+}
+
+.param-input-text {
+  padding: 8px 12px;
+}
+
+.param-input-select {
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.param-input-select option {
+  background: #0f172a;
+  color: #fff;
+}
+
+.param-input-textarea {
+  padding: 10px 12px;
+  height: 80px;
+  resize: vertical;
+  font-family: monospace;
+}
+
+.param-input-text:focus, .param-input-select:focus, .param-input-textarea:focus {
+  border-color: #6366f1;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+.param-desc-text {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.4;
+  padding-left: 2px;
+}
+
+.modal-card-footer {
+  padding: 16px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.1);
 }
 </style>

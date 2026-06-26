@@ -361,6 +361,92 @@ function send_stream_chunks(http_res, reply_content) {
     });
 }
 
+/**
+ * 流式发送工具调用 chunk 给客户端，严格遵循 OpenAI 规范
+ * @param {http.ServerResponse} http_res - HTTP 响应对象
+ * @param {Array} tool_calls - 工具调用列表
+ * @returns {Promise<void>} 延迟发送结束后的 Promise
+ */
+function send_stream_tool_calls(http_res, tool_calls) {
+    return new Promise((resolve) => {
+        if (!tool_calls || tool_calls.length === 0) {
+            resolve();
+            return;
+        }
+
+        // 1. 发送声明事件，初始化每一个工具调用项的 ID 和名称
+        const id_payload = {
+            id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: "fake-model",
+            choices: [
+                {
+                    index: 0,
+                    delta: {
+                        tool_calls: tool_calls.map((tc, idx) => ({
+                            index: idx,
+                            id: tc.id || "call_" + Math.random().toString(36).substr(2, 9),
+                            type: "function",
+                            function: {
+                                name: tc.function.name,
+                                arguments: ""
+                            }
+                        }))
+                    },
+                    finish_reason: null
+                }
+            ]
+        };
+        http_res.write(`data: ${JSON.stringify(id_payload)}\n\n`);
+
+        // 2. 延迟 100ms 触发参数传输
+        setTimeout(() => {
+            const args_payload = {
+                id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: "fake-model",
+                choices: [
+                    {
+                        index: 0,
+                        delta: {
+                            tool_calls: tool_calls.map((tc, idx) => ({
+                                index: idx,
+                                function: {
+                                    arguments: tc.function.arguments || "{}"
+                                }
+                            }))
+                        },
+                        finish_reason: null
+                    }
+                ]
+            };
+            http_res.write(`data: ${JSON.stringify(args_payload)}\n\n`);
+
+            // 3. 再延迟 100ms 触发带有 finish_reason: "tool_calls" 的收尾帧
+            setTimeout(() => {
+                const finish_payload = {
+                    id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                    object: "chat.completion.chunk",
+                    created: Math.floor(Date.now() / 1000),
+                    model: "fake-model",
+                    choices: [
+                        {
+                            index: 0,
+                            delta: {},
+                            finish_reason: "tool_calls"
+                        }
+                    ]
+                };
+                http_res.write(`data: ${JSON.stringify(finish_payload)}\n\n`);
+                resolve();
+            }, 100);
+        }, 100);
+    });
+}
+
+
 // 解析 HTTP POST 请求的数据体
 function parse_post_data(http_req) {
     return new Promise((resolve, reject) => {
@@ -493,6 +579,7 @@ async function handle_http_request(req, res) {
                 target_session.tools = tools;
                 target_session.current_http_res = res;
                 target_session.current_event = client_event;
+                target_session.updated_at = Date.now();
 
                 // 广播更新通知给符合可见性权限的前端
                 broadcast_session_event("session_updated", target_session);
@@ -514,7 +601,8 @@ async function handle_http_request(req, res) {
                     model: model,
                     tools: tools,
                     current_http_res: res,
-                    current_event: client_event
+                    current_event: client_event,
+                    updated_at: Date.now()
                 };
                 active_sessions.push(target_session);
 
@@ -569,18 +657,33 @@ async function handle_http_request(req, res) {
 
             // 循环阻塞等待人工回复，支持在同一 HTTP 连接上进行多次发送，直至会话被点击“结束”或连接断开
             while (target_session.status === 'waiting' || target_session.status === 'active') {
-                const reply_content = await client_event.wait_for_event();
+                const reply_data = await client_event.wait_for_event();
 
                 // 如果接收到 null，代表人工强制结束会话或者连接意外断开，跳出循环
-                if (reply_content === null) {
+                if (reply_data === null) {
                     break;
                 }
 
+                // 兼容处理字符串和对象负载
+                let reply_content = '';
+                let reply_tool_calls = undefined;
+                if (typeof reply_data === 'string') {
+                    reply_content = reply_data;
+                } else if (reply_data && typeof reply_data === 'object') {
+                    reply_content = reply_data.content || '';
+                    reply_tool_calls = reply_data.tool_calls;
+                }
+
                 // 将该段人工回复的内容追加记录到会话历史中
-                target_session.messages.push({
+                const assistant_message = {
                     role: "assistant",
                     content: reply_content
-                });
+                };
+                if (reply_tool_calls && reply_tool_calls.length > 0) {
+                    assistant_message.tool_calls = reply_tool_calls;
+                }
+                target_session.messages.push(assistant_message);
+                target_session.updated_at = Date.now();
 
                 if (stream) {
                     // 立即广播消息和“对话中...”状态，此时 is_waiting 为 true，锁定前端发送状态直到流式结束
@@ -590,7 +693,32 @@ async function handle_http_request(req, res) {
                     save_sessions_to_local();
 
                     // 按标点/空格切分消息并逐步输出给客户端
-                    await send_stream_chunks(res, reply_content);
+                    if (reply_content) {
+                        await send_stream_chunks(res, reply_content);
+                    }
+
+                    // 如果有工具调用，流式发送工具调用
+                    if (reply_tool_calls && reply_tool_calls.length > 0) {
+                        await send_stream_tool_calls(res, reply_tool_calls);
+                    } else if (reply_content) {
+                        // 如果只有普通文本，发送 stop 结束帧
+                        if (!res.destroyed && !res.writableEnded) {
+                            const finish_payload = {
+                                id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                                object: "chat.completion.chunk",
+                                created: Math.floor(Date.now() / 1000),
+                                model: "fake-model",
+                                choices: [
+                                    {
+                                        index: 0,
+                                        delta: {},
+                                        finish_reason: "stop"
+                                    }
+                                ]
+                            };
+                            res.write(`data: ${JSON.stringify(finish_payload)}\n\n`);
+                        }
+                    }
 
                     // 发送完该片段后，检查连接是否已断开
                     if (!res.destroyed && !res.writableEnded) {
@@ -622,7 +750,7 @@ async function handle_http_request(req, res) {
                                     role: "assistant",
                                     content: reply_content
                                 },
-                                finish_reason: "stop"
+                                finish_reason: reply_tool_calls && reply_tool_calls.length > 0 ? "tool_calls" : "stop"
                             }
                         ],
                         usage: {
@@ -631,6 +759,11 @@ async function handle_http_request(req, res) {
                             total_tokens: 0
                         }
                     };
+
+                    if (reply_tool_calls && reply_tool_calls.length > 0) {
+                        response_json.choices[0].message.tool_calls = reply_tool_calls;
+                    }
+
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(response_json));
                     target_session.is_waiting = false;
@@ -760,11 +893,11 @@ function handle_ws_connection(ws_socket, req) {
             console.log(`收到前端指令: ${type}，会话ID: ${session_id}`);
 
             if (type === 'send_reply') {
-                const { content } = message;
+                const { content, tool_calls } = message;
                 const session = active_sessions.find(s => s.session_id === session_id);
                 if (session && (session.status === 'waiting' || session.status === 'active') && session.current_event) {
                     // 触发人工回复事件，将输入内容通知并唤醒挂起的连接
-                    session.current_event.trigger_event(content);
+                    session.current_event.trigger_event({ content, tool_calls });
                 }
             } else if (type === 'end_session') {
                 const session = active_sessions.find(s => s.session_id === session_id);
